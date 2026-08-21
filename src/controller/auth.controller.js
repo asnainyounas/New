@@ -3,31 +3,30 @@ const bcrypt = require('bcryptjs')
 const jwt = require('jsonwebtoken')
 const config = require('../config/config')
 const sessionModel = require('../model/session.model')
-const { sendEmail } =require ('../services/email.service')
+const { sendEmail } = require('../services/email.service')
 const { generateOtp, getOtpHtml } = require('../utils/utils.js')
 const otpModel = require('../model/otp.model')
 
+
 async function register(req, res) {
   try {
-    const { username, email, password } = req.body
+    const { fullname, email, password } = req.body
 
-    const existingUser = await userModel.findOne({
-      $or: [{ username }, { email }]
-    })
+    const existingUser = await userModel.findOne({ email })
 
     if (existingUser) {
-      return res.status(409).send({ message: 'username or email already registered' })
+      return res.status(409).send({ message: 'email already registered' })
     }
 
     const hashedPassword = await bcrypt.hash(password, 10)
 
     const user = await userModel.create({
-      username,
+      fullname,
       email,
       password: hashedPassword
     })
 
-       const otp = generateOtp();
+    const otp = generateOtp();
     const html = getOtpHtml(otp);
 
     const otpHash = await bcrypt.hash(otp, 10);
@@ -41,7 +40,7 @@ async function register(req, res) {
 
     return res.status(201).send({
       message: 'user registered successfully',
-      user: { username: user.username, email: user.email },
+      user: { fullname: user.fullname, email: user.email },
       verified: user.verified
     })
   
@@ -60,18 +59,16 @@ async function login(req, res) {
             return res.status(400).send({ message: 'email and password are required' });
         }
 
-        
-
         const user = await userModel.findOne({ email });
         if (!user) {
             return res.status(401).send({ message: 'invalid credentials' });
         }
 
-          if (!user.verified) {
-        return res.status(401).json({
-            message: "Email not verified"
-        })
-    }
+        if (!user.verified) {
+            return res.status(401).json({
+                message: "Email not verified"
+            })
+        }
 
         const isMatch = await bcrypt.compare(password, user.password);
         if (!isMatch) {
@@ -111,7 +108,7 @@ async function login(req, res) {
 
         return res.status(200).send({
             message: 'login successful',
-            user: { username: user.username, email: user.email },
+            user: { fullname: user.fullname, email: user.email },
             accessToken
         });
 
@@ -143,7 +140,7 @@ async function getMe(req, res) {
     return res.status(200).json({
         message: "user fetched successfully",
         user: {
-            username: user.username,
+            fullname: user.fullname,
             email: user.email,
         }
     });
@@ -247,7 +244,6 @@ async function logout(req, res) {
         return res.status(401).send({ message: 'unauthorized' });
     }
 
-    
     if (session.revoked) {
         await sessionModel.updateMany({ user: decoded.id }, { revoked: true });
         return res.status(401).send({ message: 'unauthorized' });
@@ -338,16 +334,14 @@ async function verifyEmail(req, res) {
             return res.status(400).json({ message: "OTP and email are required" })
         }
 
-        // normalize email to match what's stored
         const otpDoc = await otpModel
             .findOne({ email: email.toLowerCase().trim() })
-            .sort({ createdAt: -1 }) // get most recent OTP
+            .sort({ createdAt: -1 })
 
         if (!otpDoc) {
             return res.status(400).json({ message: "Invalid OTP" })
         }
 
-        // safe expiry check only if field exists
         if (otpDoc.expiresAt && otpDoc.expiresAt < new Date()) {
             await otpModel.deleteOne({ _id: otpDoc._id })
             return res.status(400).json({ message: "OTP has expired" })
@@ -370,11 +364,52 @@ async function verifyEmail(req, res) {
         return res.status(200).json({
             message: "Email verified successfully",
             user: {
-                username: user.username,
+                fullname: user.fullname,
                 email: user.email,
                 verified: user.verified
             }
         })
+
+    } catch (err) {
+        console.log(err)
+        return res.status(500).json({ message: "Internal server error" })
+    }
+}
+
+async function resendOtp(req, res) {
+    try {
+        const { email } = req.body
+
+        if (!email) {
+            return res.status(400).json({ message: "Email is required" })
+        }
+
+        const user = await userModel.findOne({ email: email.toLowerCase().trim() })
+
+        if (!user) {
+            return res.status(404).json({ message: "User not found" })
+        }
+
+        if (user.verified) {
+            return res.status(400).json({ message: "Email already verified" })
+        }
+
+        // remove any old OTPs for this user before creating a new one
+        await otpModel.deleteMany({ user: user._id })
+
+        const otp = generateOtp();
+        const html = getOtpHtml(otp);
+
+        const otpHash = await bcrypt.hash(otp, 10);
+        await otpModel.create({
+            email: email.toLowerCase().trim(),
+            user: user._id,
+            otpHash
+        })
+
+        await sendEmail(email, "OTP Verification", `Your OTP code is ${otp}`, html)
+
+        return res.status(200).json({ message: "OTP resent successfully" })
 
     } catch (err) {
         console.log(err)
@@ -389,8 +424,6 @@ module.exports = {
     RefreshToken,
     logout,
     logoutAll,
-    verifyEmail
+    verifyEmail,
+    resendOtp
 }
-
-
-//verify token ,find user ,find session, validate,(Not critical, but cleaner logic)//
